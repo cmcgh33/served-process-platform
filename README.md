@@ -71,4 +71,4 @@ Clerk, a disposable PostgreSQL database, storage, and provider configuration are
 
 ## Portfolio context
 
-Prepared from the owner-supplied Replit export. The product is AI-assisted; the portfolio documentation was reconstructed from the implementation and distinguishes observed evidence from proposed acceptance checks. No usage, revenue, conversion, or time-savings outcomes are claimed. Raw attached working assets and exported documents are omitted from this portfolio package.
+SERVED demonstrates product workflow design, role-based experiences, business-rule validation, and integration architecture. This repository includes the application source, a product case study, and verification results, with completed checks and remaining integration testing documented separately.
