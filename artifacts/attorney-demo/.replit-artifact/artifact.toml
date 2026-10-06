@@ -1,0 +1,31 @@
+kind = "video"
+previewPath = "/attorney-demo/"
+title = "SERVED. Attorney Demo"
+version = "1.0.0"
+id = "artifacts/attorney-demo"
+router = "path"
+
+[[integratedSkills]]
+name = "video-js"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/attorney-demo/" ]
+localPort = 23108
+
+[services.development]
+run = "pnpm --filter @workspace/attorney-demo run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/attorney-demo", "run", "build" ]
+publicDir = "artifacts/attorney-demo/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23108"
+BASE_PATH = "/attorney-demo/"

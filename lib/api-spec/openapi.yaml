@@ -1,0 +1,3863 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: SERVED. On-Demand Process Serving Platform API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: jobs
+    description: Process serving jobs
+  - name: servers
+    description: Process server profiles
+  - name: clients
+    description: Law firm / client accounts
+  - name: dashboard
+    description: Dashboard summary data
+  - name: storage
+    description: Object storage upload + serving
+  - name: documents
+    description: Attorney cloud document storage
+  - name: marketplace
+    description: Subscriptions, server credentialing, pricing and wallet
+  - name: stripe
+    description: Stripe-hosted checkout and billing portal sessions
+  - name: demo
+    description: Public attorney-demo soft email-gate
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /jobs:
+    get:
+      operationId: listJobs
+      tags: [jobs]
+      summary: List all jobs
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, pending_payment, pending, assigned, in_progress, en_route, served, failed, cancelled]
+        - name: clientId
+          in: query
+          schema:
+            type: integer
+        - name: serverId
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Job"
+    post:
+      operationId: createJob
+      tags: [jobs]
+      summary: Create a new job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateJobBody"
+      responses:
+        "201":
+          description: Job created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+
+  /jobs/{id}:
+    get:
+      operationId: getJob
+      tags: [jobs]
+      summary: Get a job by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Job details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateJob
+      tags: [jobs]
+      summary: Update a job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateJobBody"
+      responses:
+        "200":
+          description: Updated job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+    delete:
+      operationId: deleteJob
+      tags: [jobs]
+      summary: Delete a draft job
+      description: |
+        Attorney-only. Permanently deletes a job in `draft` status owned by
+        the calling attorney. Posted (non-draft) jobs cannot be deleted via
+        this endpoint and must use admin tooling instead.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Draft deleted
+        "403":
+          description: Not your job
+        "404":
+          description: Job not found
+        "409":
+          description: Job is not a draft
+
+  /jobs/{id}/accept:
+    post:
+      operationId: acceptJob
+      tags: [jobs]
+      summary: Server self-assigns to a pending job
+      description: |
+        Server-only. Assigns the calling server to a pending job and moves
+        the job to `in_progress`. Rejected with 409 if the server already has
+        the maximum number of active (in_progress + en_route) jobs.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '403':
+          description: Server cannot accept (not verified, no payouts, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Active-job cap reached or job no longer pending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptCapErrorBody'
+
+  /jobs/{id}/en-route:
+    post:
+      operationId: markJobEnRoute
+      tags: [jobs]
+      summary: Mark an active job as "en route"
+      description: |
+        Server-only. Idempotently flips the assigned job to status `en_route`
+        and stamps `enRouteAt`. Allowed only when the caller is the assigned
+        server and the job is in `pending`, `assigned`, `in_progress`, or
+        already `en_route` (no-op).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Job is en_route
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '403':
+          description: Caller is not the assigned server.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Job is in a terminal state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /jobs/{id}/release:
+    post:
+      operationId: releaseJob
+      tags: [jobs]
+      summary: Release an assigned job back to the open queue
+      description: |
+        Server-only. Clears the `serverId`, resets status to `pending`,
+        records `releaseReason` and `releasedAt`. Rate-limited to prevent a
+        single server from ping-ponging the same job.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReleaseJobBody'
+      responses:
+        '200':
+          description: Job released
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '403':
+          description: Caller is not the assigned server.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Job already finalized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Released too recently — wait before releasing again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /jobs/{id}/dismiss:
+    post:
+      operationId: dismissJobFromFeed
+      tags: [jobs]
+      summary: Hide a pending job from the caller's Available feed (server only)
+      description: |
+        Server-only soft-hide. Inserts a row in `server_dismissed_jobs` so
+        the job stops appearing in this server's Available feed. Does not
+        affect any other server. Idempotent.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: Dismissed
+        '404':
+          description: Job not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /jobs/{id}/releases:
+    get:
+      operationId: listJobReleases
+      tags: [jobs]
+      summary: List release-back-to-queue events for a job
+      description: |
+        Returns the full history of times this job was released back to the
+        open queue, newest-first. Includes the releasing server's id and
+        display name plus the free-text reason captured at release time.
+        Access mirrors GET /jobs/{id}: the requester/attorney owner, the
+        currently-assigned server, or any server while the job is `pending`
+        (so the next acceptor can review prior context before accepting).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of release events ordered newest-first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JobReleaseEvent"
+        "404":
+          description: Job not found or not visible to the caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /jobs/{id}/pickup:
+    post:
+      operationId: markJobPickedUp
+      tags: [jobs]
+      summary: Mark a pickup job's documents as collected (server-only)
+      description: |
+        Server confirms they have collected the physical documents from the
+        requester/attorney's office. Only allowed when the job's
+        `documentHandling` is `pickup` and the caller is the assigned server.
+        Sets `pickedUpAt` and bumps status to `in_progress` if it was still
+        `pending` or `assigned`. Idempotent — returns 200 if already picked up.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Pickup recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+
+  /jobs/{id}/location:
+    post:
+      operationId: publishJobLocation
+      tags: [jobs]
+      summary: Publish a live GPS ping for the assigned server (server-only)
+      description: |
+        While a job is `in_progress`, the assigned server may publish their
+        current GPS so the requester and attorney can see live progress.
+        Caller must be the assigned server. Rejected when job is not in
+        `in_progress`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishLocationBody"
+      responses:
+        "204":
+          description: Ping recorded
+        "403":
+          description: Not the assigned server
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Job is not in_progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /jobs/{id}/location/latest:
+    get:
+      operationId: getJobLatestLocation
+      tags: [jobs]
+      summary: Get the latest live GPS ping for an in-progress job
+      description: |
+        Returns the most recent location ping for the assigned server.
+        Visible to the job's requester, the owning attorney, the assigned
+        server, and admins. Returns 200 with `location: null` while the job
+        is in_progress but no pings have arrived yet, so the client can
+        render an empty state. Returns 404 if the job is not currently
+        in_progress (no live tracking happens for pending/served/cancelled).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Latest known location (or null while waiting for first ping)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobLatestLocation"
+        "404":
+          description: Job not found, not visible, or not currently in_progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /jobs/{id}/documents:
+    get:
+      operationId: listJobDocuments
+      tags: [jobs, documents]
+      summary: List documents attached to a job (visible to all parties)
+      description: |
+        Returns the documents linked to this job. Visible to the job's
+        requester, any attorney who owns a document on the job, the assigned
+        server, and admins. Each document includes a relative `downloadUrl`
+        the caller can fetch (the existing /storage/objects/* endpoint
+        enforces per-object authorization, so an authenticated browser
+        session works for assigned servers and requesters too).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of documents attached to the job
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JobDocument"
+        "404":
+          description: Job not found or not visible to caller
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /jobs/{id}/ensure-affidavit:
+    post:
+      operationId: ensureJobAffidavit
+      tags: [jobs]
+      summary: Ensure the affidavit PDF exists for a served job
+      description: |
+        Idempotent self-heal endpoint. If the job is in `served` state and
+        already has a `proofPdfUrl`, returns the existing path unchanged.
+        If `proofPdfUrl` is missing but the captured signature data is
+        present, generates the affidavit PDF on demand and persists it.
+
+        Authorized for the job's requester, the assigned server, and admins.
+        Returns 412 if the job hasn't been served yet, and 422 if the job
+        was served without the signature data needed to render the
+        affidavit (legacy jobs from before signature capture was required).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Affidavit is now available
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proofPdfUrl]
+                properties:
+                  proofPdfUrl:
+                    type: string
+                  alreadyExisted:
+                    type: boolean
+        "403":
+          description: Caller is not authorized for this job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "412":
+          description: Job has not been served yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          description: Job is served but lacks the signature data needed to render the affidavit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /jobs/{id}/ensure-notice-of-mail:
+    post:
+      operationId: ensureJobNoticeOfMail
+      tags: [jobs]
+      summary: Ensure the Notice of Service by Mail PDF exists for a substitute job
+      description: |
+        Idempotent self-heal for the companion "Notice of Service by Mail"
+        (NRCP 4.2). If the job already has a `noticeOfMailPdfUrl`, returns
+        the existing path unchanged. Otherwise, when the job qualifies
+        (status=served, completing attempt is substitute with a committed
+        follow-up mailing), generates the notice PDF on demand and persists
+        it. Jobs that don't qualify return `200` with `notApplicable=true`
+        — this lets the proof page poll without special-casing personal
+        service. Authorized for the job's requester, the assigned server,
+        and admins.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Notice is now available, or the job legitimately doesn't need one
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  noticeOfMailPdfUrl:
+                    type: string
+                    nullable: true
+                  alreadyExisted:
+                    type: boolean
+                  notApplicable:
+                    type: boolean
+                    description: True when the job's completing attempt isn't a substitute with a committed mailing follow-up.
+        "403":
+          description: Caller is not authorized for this job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "412":
+          description: Job has not been served yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          description: Job is served but lacks the signature data needed to render the notice
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /jobs/{id}/backfill-attempt-identity:
+    post:
+      operationId: backfillJobAttemptIdentity
+      tags: [jobs]
+      summary: Backfill the identity-confirmation field on the latest completing attempt
+      description: |
+        Targeted self-heal for served jobs whose completing service attempt
+        was persisted before identity-method capture was required (or whose
+        client dropped the field on the wire). Fills `service_attempts.identityMethod`
+        and (when `other`) `identityOtherText` on the most recent
+        personal/substitute attempt for the job.
+
+        Idempotent and write-once: only updates rows where `identityMethod IS NULL`,
+        so a second call after success is a no-op (returns 409). Authorized for
+        the assigned server only — the server is the one swearing the affidavit
+        and is the only party with first-hand knowledge of how identity was
+        confirmed at the door.
+
+        Once this succeeds, the affidavit completeness gate unblocks and a
+        follow-up `POST /jobs/{id}/ensure-affidavit` (and ensure-notice-of-mail
+        for substitute jobs) can render the PDFs.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identityMethod]
+              properties:
+                identityMethod:
+                  type: string
+                  enum: [verbal, photo_match, known, other]
+                identityOtherText:
+                  type: string
+                  description: Required free-text description when identityMethod is "other".
+      responses:
+        "200":
+          description: Identity field backfilled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Caller is not the assigned server
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Job not found, or no completing attempt to backfill
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Identity field already set (no-op)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /jobs/{id}/attempts:
+    get:
+      operationId: listJobAttempts
+      tags: [jobs]
+      summary: List service attempts for a job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of attempts ordered newest-first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ServiceAttempt"
+    post:
+      operationId: logServiceAttempt
+      tags: [jobs]
+      summary: Log a service attempt (server-only)
+      description: |
+        Records a single service attempt with GPS, optional photo, and outcome.
+        Outcome must be one of `personal`, `substitute`, or `unable`. When the
+        outcome is `personal` or `substitute`, the job is marked served and the
+        payout flow is triggered. `substitute` additionally requires
+        `substituteRecipientName`, `substituteOver18=true`, and
+        `substituteVerifiedResidence=true`. `unable` requires `unableReason`.
+
+        State-specific substitute rules are also enforced (based on the job's
+        `recipientState`): California and New York additionally require
+        `acknowledgeMailFollowup=true`; Florida requires
+        `substituteIsCoResident=true` and lets the recipient be 15+ if
+        `substituteRecipientAge` is supplied (overriding the universal 18+).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LogAttemptBody"
+      responses:
+        "201":
+          description: Attempt recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceAttempt"
+
+  /jobs/{id}/confirm-mailing:
+    post:
+      operationId: confirmJobMailing
+      tags: [jobs]
+      summary: Confirm the substitute follow-up mailing was actually sent (server-only)
+      description: |
+        For substitute-service jobs, the server originally captured a
+        *commitment* to mail (mailingDate + mailingAddress) at mark-served
+        time. This endpoint records the *completion* of that mailing.
+
+        Authorized only for the server assigned to the job. The endpoint
+        operates on the latest substitute attempt for the job and is
+        idempotent on `mailingCompletedAt`: once set, subsequent calls
+        return 409 with the existing record.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmMailingBody"
+      responses:
+        "200":
+          description: Mailing confirmation recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceAttempt"
+        "400":
+          description: Job has no substitute attempt with a committed mailing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Caller is not the assigned server for this job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Mailing was already confirmed; existing record returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceAttempt"
+
+  /servers:
+    get:
+      operationId: listServers
+      tags: [servers]
+      summary: List all process servers
+      responses:
+        "200":
+          description: List of servers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Server"
+    post:
+      operationId: createServer
+      tags: [servers]
+      summary: Create a process server profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateServerBody"
+      responses:
+        "201":
+          description: Server created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Server"
+
+  /servers/{id}:
+    get:
+      operationId: getServer
+      tags: [servers]
+      summary: Get a server profile
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Server profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Server"
+    patch:
+      operationId: updateServer
+      tags: [servers]
+      summary: Update a server profile
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateServerBody"
+      responses:
+        "200":
+          description: Updated server
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Server"
+
+  /clients:
+    get:
+      operationId: listClients
+      tags: [clients]
+      summary: List all clients
+      responses:
+        "200":
+          description: List of clients
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Client"
+    post:
+      operationId: createClient
+      tags: [clients]
+      summary: Create a client
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateClientBody"
+      responses:
+        "201":
+          description: Client created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Client"
+
+  /demo/invites/{token}:
+    get:
+      operationId: getDemoInvite
+      tags: [demo]
+      summary: Look up an attorney-demo invite by token (public)
+      description: |
+        Public, unauthenticated. Returns minimal metadata about the invite
+        so the watch page can render a tailored email-gate. Never returns
+        the recipient email itself — the visitor must type it back in.
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Invite found and still valid.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [validUntil, alreadyConfirmed]
+                properties:
+                  recipientName:
+                    type: string
+                    nullable: true
+                  validUntil:
+                    type: string
+                    format: date-time
+                  alreadyConfirmed:
+                    type: boolean
+        "404":
+          description: Token not found, expired, or revoked.
+
+  /demo/invites/{token}/confirm:
+    post:
+      operationId: confirmDemoInvite
+      tags: [demo]
+      summary: Soft email-gate for the attorney-demo watch page (public)
+      description: |
+        Public, unauthenticated. The visitor types the email the invite
+        was addressed to; on a case-insensitive match we stamp viewed_at
+        (idempotent) and return ok. Wrong email returns 403 without
+        leaking the real address.
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        "200":
+          description: Email matches; viewed_at recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+        "400":
+          description: Email missing or malformed.
+        "403":
+          description: Email does not match the invitation.
+        "404":
+          description: Token not found, expired, or revoked.
+
+  /dashboard/summary:
+    get:
+      operationId: getDashboardSummary
+      tags: [dashboard]
+      summary: Get dashboard summary stats
+      responses:
+        "200":
+          description: Summary stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardSummary"
+
+  /dashboard/recent-jobs:
+    get:
+      operationId: getRecentJobs
+      tags: [dashboard]
+      summary: Get most recent jobs
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: Recent jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Job"
+
+  /dashboard/status-breakdown:
+    get:
+      operationId: getStatusBreakdown
+      tags: [dashboard]
+      summary: Get job counts grouped by status
+      responses:
+        "200":
+          description: Status breakdown
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StatusCount"
+
+  /storage/server-photo/request-url:
+    post:
+      tags: [storage]
+      operationId: requestServerPhotoUploadUrl
+      summary: Request a presigned URL for a server proof photo
+      description: |
+        Server-only. Returns a presigned upload URL for a GPS-stamped photo
+        captured during a service attempt or successful service. Caller must
+        be the assigned server on the job.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServerPhotoUploadRequest'
+      responses:
+        '200':
+          description: Presigned upload URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerPhotoUploadResponse'
+        '400':
+          description: Missing or invalid required fields.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: Caller is not the assigned server on the job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /storage/profile-photo/request-url:
+    post:
+      tags: [storage]
+      operationId: requestProfilePhotoUploadUrl
+      summary: Request a presigned URL for a server profile headshot
+      description: |
+        Server-only. Returns a presigned upload URL for the caller's own
+        profile headshot. No job binding — any authenticated server may
+        request one for themselves.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfilePhotoUploadRequest'
+      responses:
+        '200':
+          description: Presigned upload URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerPhotoUploadResponse'
+        '403':
+          description: Caller is not a server.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /storage/uploads/request-url:
+    post:
+      tags: [storage]
+      operationId: requestUploadUrl
+      summary: Request a presigned URL for file upload
+      description: |
+        Returns a presigned GCS URL for direct upload. The client sends JSON
+        metadata here, then uploads the file directly to the returned URL.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadUrlRequest'
+      responses:
+        '200':
+          description: Presigned upload URL generated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadUrlResponse'
+        '400':
+          description: Missing or invalid required fields.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '413':
+          description: Upload would exceed the attorney's plan storage quota.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Failed to generate upload URL.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /documents:
+    get:
+      tags: [documents]
+      operationId: listDocuments
+      summary: List the caller's cloud documents
+      parameters:
+        - name: jobId
+          in: query
+          schema:
+            type: integer
+          description: Optional job filter.
+      responses:
+        '200':
+          description: Documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Document'
+    post:
+      tags: [documents]
+      operationId: createDocument
+      summary: Record a newly uploaded document
+      description: |
+        Call after the file has been PUT to the presigned URL. Persists
+        metadata (objectPath, name, size, contentType) and links it to the
+        attorney owner (and optional job).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDocumentBody'
+      responses:
+        '201':
+          description: Document recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '400':
+          description: Invalid body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /documents/{id}:
+    delete:
+      tags: [documents]
+      operationId: deleteDocument
+      summary: Delete a cloud document
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: Deleted.
+        '404':
+          description: Not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /documents/usage:
+    get:
+      tags: [documents]
+      operationId: getDocumentUsage
+      summary: Caller's storage usage and quota
+      responses:
+        '200':
+          description: Usage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentUsage'
+
+  /pricing:
+    get:
+      tags: [marketplace]
+      operationId: getPricing
+      summary: Pricing snapshot for serves, subscriptions and credentialing
+      responses:
+        '200':
+          description: Pricing snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PricingSnapshot'
+
+  /me/subscription:
+    get:
+      tags: [marketplace]
+      operationId: getMySubscription
+      summary: Caller's ProServe subscription (attorney only)
+      responses:
+        '200':
+          description: Subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '404':
+          description: No subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /me/vault-subscription:
+    get:
+      tags: [marketplace]
+      operationId: getMyVaultSubscription
+      summary: Caller's Personal Vault subscription (requester only)
+      responses:
+        '200':
+          description: Vault subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultSubscription'
+        '404':
+          description: No vault subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /me/credentialing:
+    get:
+      tags: [marketplace]
+      operationId: getMyCredentialing
+      summary: Caller's server credentialing status (server only)
+      responses:
+        '200':
+          description: Credentialing record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerCredential'
+        '404':
+          description: Not started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /me/server-profile:
+    get:
+      tags: [marketplace]
+      operationId: getMyServerProfile
+      summary: Caller's server profile (server only)
+      description: |
+        Returns the caller's own server record. Used by the credentialing
+        page to render the Server Profile panel (business address + Nevada
+        process-server credentials).
+      responses:
+        '200':
+          description: Server profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Server'
+        '404':
+          description: No server record on file
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    patch:
+      tags: [marketplace]
+      operationId: updateMyServerProfile
+      summary: Update the caller's own server profile (server only)
+      description: |
+        Lets a server self-edit profile fields needed for Nevada-compliant
+        affidavits — business address, NV-licensed flag, license number,
+        and license county. Server tier and active flag are not editable
+        here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMyServerProfileBody'
+      responses:
+        '200':
+          description: Updated server profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Server'
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: No server record on file
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /me/wallet:
+    get:
+      tags: [marketplace]
+      operationId: getMyWallet
+      summary: Caller's lifetime payout totals (server only)
+      responses:
+        '200':
+          description: Wallet totals
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Wallet'
+
+  /me/payouts/instant:
+    post:
+      tags: [marketplace]
+      operationId: triggerInstantPayout
+      summary: |
+        "Pay Now" — pull the connected account's available balance to the
+        server's bank as an off-schedule standard payout (~2 business
+        days). Does not affect the account's normal weekly schedule.
+      responses:
+        '200':
+          description: Payout created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstantPayoutResponse'
+        '400':
+          description: |
+            No Connect account, payouts not yet enabled, no available
+            balance, or Stripe rejected the payout.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /me/server-status:
+    get:
+      tags: [marketplace]
+      operationId: getServerStatus
+      summary: Combined credentialing + Connect status for the server portal (server only)
+      responses:
+        '200':
+          description: Server status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerStatus'
+
+  /me/training/complete:
+    post:
+      tags: [marketplace]
+      operationId: completeServerTraining
+      summary: Mark the server's onboarding training as complete (server only)
+      description: |
+        Stamps `server_credentials.training_completed_at` for the calling
+        server. Idempotent — calling twice keeps the original timestamp.
+        After this fires, the server can claim their first job; before it,
+        POST /jobs/:id/accept rejects with reason `training_required`.
+      responses:
+        '200':
+          description: Training completion timestamp
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trainingCompletedAt]
+                properties:
+                  trainingCompletedAt:
+                    type: string
+                    format: date-time
+
+  /me/firm-profile:
+    get:
+      tags: [marketplace]
+      operationId: getMyFirmProfile
+      summary: Attorney's saved firm profile (mailing address + pickup contact)
+      description: |
+        Returns the calling attorney's firm profile. Used by the post-job
+        form to autofill pickup fields when handover is `pickup` or
+        `either`. All fields are nullable; an attorney with no saved
+        profile gets a row of nulls back rather than a 404.
+      responses:
+        '200':
+          description: Firm profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FirmProfile'
+    patch:
+      tags: [marketplace]
+      operationId: updateMyFirmProfile
+      summary: Save the calling attorney's firm profile
+      description: |
+        Upserts the firm-profile columns on the caller's user row. Pass
+        empty string or null to clear a field. Returns the persisted
+        profile so the client can update its cache without a refetch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FirmProfile'
+      responses:
+        '200':
+          description: Updated firm profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FirmProfile'
+
+  /me/account:
+    get:
+      tags: [marketplace]
+      operationId: getMyAccount
+      summary: Read mutable account fields (phone, SMS opt-out)
+      responses:
+        '200':
+          description: Account preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountPreferences'
+    patch:
+      tags: [marketplace]
+      operationId: updateMyAccount
+      summary: Update mutable account fields (phone, SMS opt-out)
+      description: |
+        Patches account-level preferences shared across portals: phone
+        number used for SMS notifications and the per-account SMS
+        kill-switch. Display name + email are managed by Clerk and not
+        editable here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountPreferences'
+      responses:
+        '200':
+          description: Updated account preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountPreferences'
+
+  /me/draft-checkout-queue:
+    get:
+      tags: [marketplace]
+      operationId: getMyDraftCheckoutQueue
+      summary: Active split-checkout queue for the caller (attorney only)
+      description: |
+        Returns the caller's currently-active multi-batch draft checkout
+        queue, if any. Auto-prunes chunks whose jobs have all already left
+        `draft` status (e.g. paid via the single-job button or via the
+        webhook for a previous batch) before returning, so the response
+        always reflects what's still actually payable. Returns 404 when
+        there is no active queue.
+      responses:
+        '200':
+          description: Active queue snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DraftCheckoutQueue'
+        '404':
+          description: No active queue for the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    put:
+      tags: [marketplace]
+      operationId: upsertMyDraftCheckoutQueue
+      summary: Save (or replace) the caller's split-checkout queue (attorney only)
+      description: |
+        Persists the planned chunks for a multi-batch checkout so the
+        attorney can resume after closing the tab or signing in on a
+        different device. Replaces any existing queue for the caller.
+        All referenced jobs must currently be in `draft` status and
+        belong to the caller.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertDraftCheckoutQueueBody'
+      responses:
+        '200':
+          description: Queue persisted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DraftCheckoutQueue'
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: One or more jobs are no longer in draft status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      tags: [marketplace]
+      operationId: dismissMyDraftCheckoutQueue
+      summary: Dismiss the caller's active split-checkout queue (attorney only)
+      description: |
+        Marks the caller's active queue as dismissed so the resume banner
+        no longer appears. Drafts that haven't been paid for yet remain as
+        drafts. Idempotent — returns 200 even if there was nothing to
+        dismiss.
+      responses:
+        '200':
+          description: Dismissed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DismissedResponse'
+
+  /stripe/credentialing-checkout:
+    post:
+      tags: [stripe]
+      operationId: createCredentialingCheckout
+      summary: Start Stripe Checkout for the $24.99 server background-check fee (server only)
+      responses:
+        '200':
+          description: Hosted Checkout URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialingCheckoutResponse'
+        '409':
+          description: Already initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /stripe/connect/onboard:
+    post:
+      tags: [stripe]
+      operationId: startConnectOnboarding
+      summary: Create or reuse a Stripe Connect Express account and return a hosted onboarding link (server only)
+      responses:
+        '200':
+          description: AccountLink URL for hosted onboarding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectOnboardResponse'
+
+  /stripe/connect/refresh:
+    post:
+      tags: [stripe]
+      operationId: refreshConnectStatus
+      summary: Re-fetch the connected account from Stripe and mirror payouts_enabled locally (server only)
+      responses:
+        '200':
+          description: Refreshed Connect status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectRefreshResponse'
+
+  /stripe/connect/dashboard-login:
+    post:
+      tags: [stripe]
+      operationId: getConnectDashboardLogin
+      summary: Mint a one-time login link to the server's Stripe Express dashboard (server only)
+      responses:
+        '200':
+          description: Stripe Express login link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectDashboardLoginResponse'
+
+  /admin/server/{serverId}/verify:
+    post:
+      tags: [marketplace]
+      operationId: adminVerifyServer
+      summary: Admin manual-verify a server (admin allowlist only)
+      parameters:
+        - in: path
+          name: serverId
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Updated credential row
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminVerifyServerResponse'
+
+  /admin/server/{serverId}/fail:
+    post:
+      tags: [marketplace]
+      operationId: adminFailServer
+      summary: Admin manual-fail a server background check (admin allowlist only)
+      parameters:
+        - in: path
+          name: serverId
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminFailServerBody'
+      responses:
+        '200':
+          description: Updated credential row
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminVerifyServerResponse'
+
+  /stripe/proserve-checkout:
+    post:
+      tags: [stripe]
+      operationId: createProServeCheckout
+      summary: Start ProServe Stripe Checkout, or switch tier in place (attorney only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProServeCheckoutBody'
+      responses:
+        '200':
+          description: Either a hosted Checkout URL (new sub) or a switched flag (live tier change).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutOrSwitchResponse'
+
+  /stripe/vault-checkout:
+    post:
+      tags: [stripe]
+      operationId: createVaultCheckout
+      summary: Start Personal Vault Stripe Checkout, or switch tier in place (requester only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VaultCheckoutBody'
+      responses:
+        '200':
+          description: Either a hosted Checkout URL (new sub) or a switched flag (live tier change).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutOrSwitchResponse'
+
+  /stripe/draft-jobs/checkout:
+    post:
+      tags: [stripe]
+      operationId: createDraftJobsCheckout
+      summary: Start Stripe Checkout to pay for one or more draft jobs (attorney only)
+      description: |
+        Creates a Stripe Checkout session with one line item per draft job
+        owned by the calling attorney. Each line item uses the snapshot
+        `grossCents` stored on the job row at create time. On successful
+        completion the webhook flips every covered job from `draft` to
+        `pending`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftJobsCheckoutBody'
+      responses:
+        '200':
+          description: Hosted Checkout URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DraftJobsCheckoutResponse'
+        '400':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: At least one job is not owned by the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: At least one job is not in draft state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /pricing/serve-preview:
+    get:
+      tags: [pricing]
+      operationId: getServePricePreview
+      summary: Live per-serve price for the caller's tier and the requested service type
+      description: |
+        Returns the price the caller would be charged today for a single
+        serve at the given service type. Drives the live price card on the
+        attorney's Post-a-Job form. The price is derived from the caller's
+        active ProServe subscription (if any) so subscribers see their
+        discounted rate immediately.
+      parameters:
+        - name: serviceType
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [standard, rush, licensed]
+      responses:
+        '200':
+          description: Live price snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServePricePreview'
+
+  /stripe/portal-session:
+    post:
+      tags: [stripe]
+      operationId: createPortalSession
+      summary: Open the Stripe Billing Portal for the caller's customer record
+      responses:
+        '200':
+          description: Portal URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalSessionResponse'
+        '404':
+          description: Caller has no Stripe customer yet (no subscription started).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    Job:
+      type: object
+      properties:
+        id:
+          type: integer
+        status:
+          type: string
+          enum: [draft, pending_payment, pending, assigned, in_progress, en_route, served, failed, cancelled]
+        documentType:
+          type: string
+        recipientName:
+          type: string
+        recipientAddress:
+          type: string
+        recipientCity:
+          type: string
+        recipientState:
+          type: string
+        recipientZip:
+          type: string
+        caseNumber:
+          type: string
+        deptNumber:
+          type: string
+          nullable: true
+          description: Department / division number on the case caption (e.g. "14"). Optional.
+        matterName:
+          type: string
+        requesterName:
+          type: string
+          nullable: true
+          description: |
+            Name of the natural person on record as the requester (for
+            individual filers, this is themselves; for firms, the named
+            attorney/paralegal). Captured at job creation as a snapshot so
+            it appears on the affidavit even if the Clerk profile later
+            changes. Required at publish time (drafts exempt).
+        requesterEmail:
+          type: string
+          nullable: true
+          description: Snapshot email for the requester. Required at publish time.
+        requesterPhone:
+          type: string
+          nullable: true
+          description: Optional snapshot phone for the requester.
+        courtName:
+          type: string
+          nullable: true
+          description: |
+            Issuing court — e.g. "Eighth Judicial District Court, Clark
+            County, Nevada". Surfaced in the affidavit case caption.
+        petitioner:
+          type: string
+          nullable: true
+          description: Petitioner / plaintiff party name on the case caption.
+        respondent:
+          type: string
+          nullable: true
+          description: Respondent / defendant party name on the case caption.
+        documentsServed:
+          type: array
+          description: |
+            Catalogue of legal documents to be delivered. Distinct from
+            uploaded file blobs — this is the affidavit-line list (Summons,
+            Complaint, etc.). Returned inline on GET /jobs/:id.
+          items:
+            $ref: "#/components/schemas/JobServedDocument"
+        notes:
+          type: string
+        documentHandling:
+          type: string
+          enum: [prints, pickup, either]
+          description: |
+            How the server obtains the documents to serve.
+            `prints` — the server prints from the uploaded PDF on their end (default).
+            `pickup` — the server picks up physical documents from the requester/attorney's office.
+            `either` — the requester offers both; the server chooses at job time. Pickup fields are still required.
+        pickupAddress:
+          type: string
+          nullable: true
+          description: Pickup street address. Required when documentHandling = pickup.
+        pickupCity:
+          type: string
+          nullable: true
+        pickupState:
+          type: string
+          nullable: true
+        pickupZip:
+          type: string
+          nullable: true
+        pickupContactName:
+          type: string
+          nullable: true
+          description: Name of the contact at the pickup location (e.g. paralegal).
+        pickupContactPhone:
+          type: string
+          nullable: true
+        clientId:
+          type: integer
+        serverId:
+          type: integer
+        client:
+          $ref: "#/components/schemas/Client"
+        server:
+          $ref: "#/components/schemas/Server"
+        assignedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Timestamp the currently-assigned server first claimed (or was
+            assigned to) this job. Set when a server self-accepts via
+            POST /jobs/{id}/accept, when the requester PATCHes a serverId
+            onto the job, or when an admin assigns via
+            POST /admin/jobs/{id}/assign. Cleared on release back to the
+            queue so the next acceptor's claim re-stamps it.
+        pickedUpAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Timestamp the assigned server confirmed they have collected the
+            physical documents from the requester/attorney's office. Only
+            populated when documentHandling = pickup.
+        servedAt:
+          type: string
+          format: date-time
+        enRouteAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the assigned server hit the Navigate / "I'm en route" button.
+        releaseReason:
+          type: string
+          nullable: true
+          description: Free-text reason captured when a server returned the job to the queue.
+        releasedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the job was last released back to the open queue.
+        gpsLat:
+          type: number
+        gpsLng:
+          type: number
+        proofPhotoUrl:
+          type: string
+          nullable: true
+          description: Object-storage path for the photo captured at successful service.
+        proofPdfUrl:
+          type: string
+          nullable: true
+          description: Object-storage path for the generated affidavit PDF (served via /api/storage/objects/*).
+        noticeOfMailPdfUrl:
+          type: string
+          nullable: true
+          description: |
+            Object-storage path for the companion "Notice of Service by Mail"
+            PDF generated alongside the affidavit when the completing
+            attempt is a Nevada substitute service with a committed
+            follow-up mailing (NRCP 4.2). The notice is cross-referenced
+            from the affidavit body via a deterministic ref number
+            (`<platformRef>-NSM`). Null for personal-service jobs and
+            substitute jobs with no mailing follow-up.
+        signatureTypedName:
+          type: string
+          nullable: true
+          description: Server's typed printed name captured at confirm time.
+        signatureImageUrl:
+          type: string
+          nullable: true
+          description: Object-storage path for the canvas-drawn server signature image.
+        payoutEligibleAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When set, the job is eligible for payout (stamped inside the served-flip txn).
+        attemptCount:
+          type: integer
+          description: Number of service attempts logged for this job (computed).
+        platformRef:
+          type: string
+        serviceType:
+          type: string
+          enum: [standard, rush, licensed]
+          description: Service tier requested for this job. Drives pricing.
+        pricingTier:
+          type: string
+          enum: [public, solo, firm, firm_pro]
+          description: Snapshot of the creator's effective pricing tier at job-create time.
+        grossCents:
+          type: integer
+          description: Total amount charged for this job in cents.
+        platformFeeCents:
+          type: integer
+          description: SERVED.'s 20% cut, in cents.
+        serverPayoutCents:
+          type: integer
+          description: Server's 80% take, in cents.
+        requiresLicensedServer:
+          type: boolean
+          description: |
+            True iff at least one document being served is a Nevada-PILB-
+            restricted type (subpoenas, summons, complaints, etc.). Stamped
+            server-side at job-create time and on the draft→pending flip.
+            The marketplace feed hides these from non-licensed servers and
+            the /jobs/:id/accept gate returns 403 with reason="license_required"
+            for unlicensed callers.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - status
+        - documentType
+        - recipientName
+        - recipientAddress
+        - recipientCity
+        - recipientState
+        - recipientZip
+        - platformRef
+        - serviceType
+        - pricingTier
+        - grossCents
+        - platformFeeCents
+        - serverPayoutCents
+        - createdAt
+        - updatedAt
+
+    CreateJobBody:
+      type: object
+      properties:
+        documentType:
+          type: string
+        recipientName:
+          type: string
+        recipientAddress:
+          type: string
+        recipientCity:
+          type: string
+        recipientState:
+          type: string
+        recipientZip:
+          type: string
+        caseNumber:
+          type: string
+        deptNumber:
+          type: string
+          description: Department / division number on the case caption (e.g. "14"). Optional.
+        matterName:
+          type: string
+        requesterName:
+          type: string
+          description: |
+            Name of the natural person on record as the requester (snapshot).
+            Required at publish time; drafts exempt.
+        requesterEmail:
+          type: string
+          format: email
+          description: Snapshot email for the requester. Required at publish time.
+        requesterPhone:
+          type: string
+          description: Optional snapshot phone for the requester.
+        courtName:
+          type: string
+          description: Issuing court (rendered into the affidavit caption).
+        petitioner:
+          type: string
+          description: Petitioner / plaintiff party name.
+        respondent:
+          type: string
+          description: Respondent / defendant party name.
+        documentsServed:
+          type: array
+          description: |
+            Documents-served catalogue inserted as child rows. May be empty —
+            the affidavit will fall back to `documentType` for legacy jobs.
+          items:
+            $ref: "#/components/schemas/JobServedDocumentInput"
+        notes:
+          type: string
+        documentHandling:
+          type: string
+          enum: [prints, pickup, either]
+          description: |
+            How the server obtains the documents. Defaults to `prints`.
+            When `pickup` or `either`, all `pickup*` fields below are required.
+        pickupAddress:
+          type: string
+          description: Required when documentHandling = pickup.
+        pickupCity:
+          type: string
+        pickupState:
+          type: string
+        pickupZip:
+          type: string
+        pickupContactName:
+          type: string
+        pickupContactPhone:
+          type: string
+        clientId:
+          type: integer
+        serverId:
+          type: integer
+        serviceType:
+          type: string
+          enum: [standard, rush, licensed]
+          description: Service tier requested. Defaults to "standard".
+        initialStatus:
+          type: string
+          enum: [pending, pending_payment, draft]
+          description: |
+            Optional starting status for the job. Defaults to `pending`
+            (immediately visible to servers). Requesters paying via Stripe
+            Checkout send `pending_payment` so the job stays hidden until
+            the webhook confirms payment. Attorneys saving a job for later
+            pay-as-you-go batch checkout send `draft`.
+      required:
+        - documentType
+        - recipientName
+        - recipientAddress
+        - recipientCity
+        - recipientState
+        - recipientZip
+
+    UpdateJobBody:
+      type: object
+      description: |
+        Partial update for a job. The recipient/document/service-speed fields
+        (documentType, serviceType, recipientName, recipientAddress,
+        recipientCity, recipientState, recipientZip, caseNumber, matterName)
+        are only editable while the job is still in `draft` status — once a
+        draft has been paid for and is pending in the marketplace, those
+        fields are locked.
+      properties:
+        status:
+          type: string
+          enum: [pending, assigned, in_progress, en_route, served, failed, cancelled]
+        serverId:
+          type: integer
+        notes:
+          type: string
+        documentHandling:
+          type: string
+          enum: [prints, pickup, either]
+        pickupAddress:
+          type: string
+        pickupCity:
+          type: string
+        pickupState:
+          type: string
+        pickupZip:
+          type: string
+        pickupContactName:
+          type: string
+        pickupContactPhone:
+          type: string
+        documentType:
+          type: string
+          minLength: 1
+        serviceType:
+          type: string
+          enum: [standard, rush, licensed]
+        recipientName:
+          type: string
+          minLength: 1
+        recipientAddress:
+          type: string
+          minLength: 1
+        recipientCity:
+          type: string
+          minLength: 1
+        recipientState:
+          type: string
+          minLength: 2
+          maxLength: 2
+        recipientZip:
+          type: string
+          minLength: 5
+        caseNumber:
+          type: string
+        deptNumber:
+          type: string
+        matterName:
+          type: string
+        requesterName:
+          type: string
+        requesterEmail:
+          type: string
+          format: email
+        requesterPhone:
+          type: string
+        courtName:
+          type: string
+        petitioner:
+          type: string
+        respondent:
+          type: string
+        documentsServed:
+          type: array
+          description: |
+            Replace the documents-served catalogue. Same edit window as the
+            other recipient/matter fields — only writeable while the job is
+            in `draft` status. Sending an empty array clears the list.
+          items:
+            $ref: "#/components/schemas/JobServedDocumentInput"
+
+    ReleaseJobBody:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 3
+          maxLength: 500
+          description: Free-text reason captured when the server returns a job to the queue.
+
+    JobReleaseEvent:
+      type: object
+      description: |
+        One row in the audit trail of times a job was released back to the
+        open queue. The most-recent event is also mirrored on the parent Job
+        as `releaseReason` / `releasedAt` for quick access without a second
+        fetch.
+      properties:
+        id:
+          type: integer
+        jobId:
+          type: integer
+        serverId:
+          type: integer
+          description: ID of the server who released the job.
+        serverName:
+          type: string
+          nullable: true
+          description: Display name of the releasing server, if still resolvable.
+        reason:
+          type: string
+          description: Free-text reason the server gave when releasing.
+        releasedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - jobId
+        - serverId
+        - reason
+        - releasedAt
+
+    AcceptCapErrorBody:
+      type: object
+      required: [error, code]
+      description: Returned when the active-job cap is hit on accept.
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+          enum: [active_job_cap, not_pending, dismissed]
+        activeJobCount:
+          type: integer
+          description: Current count of active (in_progress + en_route) jobs the caller holds.
+        maxActiveJobs:
+          type: integer
+          description: Maximum allowed active jobs per server.
+
+    ServiceAttempt:
+      type: object
+      properties:
+        id:
+          type: integer
+        jobId:
+          type: integer
+        serverId:
+          type: integer
+        outcome:
+          type: string
+          enum: [personal, substitute, mail, posting, publication, non_est, unable]
+        attemptedAt:
+          type: string
+          format: date-time
+        gpsLat:
+          type: number
+        gpsLng:
+          type: number
+        gpsProvider:
+          type: string
+          nullable: true
+          description: Provenance of the GPS fix ("gps", "gps_assisted", "network"). Heuristic-derived from coords.accuracy.
+        identityMethod:
+          type: string
+          nullable: true
+          enum: [verbal, photo_match, known, other]
+          description: How the server confirmed the recipient's identity at the door.
+        identityOtherText:
+          type: string
+          nullable: true
+          description: Free-text explanation when identityMethod = "other".
+        notes:
+          type: string
+          nullable: true
+        photoUrl:
+          type: string
+          nullable: true
+        substituteRecipientName:
+          type: string
+          nullable: true
+        substituteOver18:
+          type: boolean
+          nullable: true
+        substituteVerifiedResidence:
+          type: boolean
+          nullable: true
+        substituteRecipientAge:
+          type: integer
+          nullable: true
+          description: Explicit age of the substitute recipient. Used in Florida where the threshold is 15+.
+        substituteIsCoResident:
+          type: boolean
+          nullable: true
+          description: Whether the substitute lives at the address. Required for Florida substitute service.
+        acknowledgeMailFollowup:
+          type: boolean
+          nullable: true
+          description: Server commits to mailing a copy of the documents (CA within 10 days, NY promptly).
+        serviceAddress:
+          type: string
+          nullable: true
+          description: Street address where service was effected. May differ from the job's recipient address.
+        serviceCity:
+          type: string
+          nullable: true
+        serviceState:
+          type: string
+          nullable: true
+        serviceZip:
+          type: string
+          nullable: true
+        methodNarrative:
+          type: string
+          nullable: true
+          description: Free-text description of how service was effected (rendered into the affidavit).
+        recipientRelationship:
+          type: string
+          nullable: true
+          description: Relationship of the substitute recipient to the named party (e.g. "spouse", "co-resident").
+        recipientDescription:
+          type: string
+          nullable: true
+          description: |
+            Free-text physical description of the person served. Kept for
+            backwards compatibility with legacy attempts; new attempts
+            populate the structured fields below instead.
+        recipientAgeEstimate:
+          type: string
+          nullable: true
+          description: Estimated age (or age range) of the substitute recipient.
+        recipientGender:
+          type: string
+          nullable: true
+          description: Reported gender of the substitute recipient.
+        recipientHeight:
+          type: string
+          nullable: true
+          description: Approximate height of the substitute recipient.
+        recipientWeight:
+          type: string
+          nullable: true
+          description: Approximate weight of the substitute recipient.
+        recipientIdentifyingFeatures:
+          type: string
+          nullable: true
+          description: Identifying features (hair, glasses, build, etc.) of the substitute recipient.
+        mailingDate:
+          type: string
+          format: date-time
+          nullable: true
+          description: Date the follow-up mailing was (or will be) deposited (substitute / mail outcomes). This is the server's *commitment* captured at mark-served time. See `mailingCompletedAt` for actual completion.
+        mailingAddress:
+          type: string
+          nullable: true
+          description: Address to which the follow-up copy was mailed.
+        mailingCompletedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp the server *actually* completed the follow-up mailing (set via POST /jobs/{id}/confirm-mailing). Null while the mailing is pending.
+        mailingProofPhotoUrl:
+          type: string
+          nullable: true
+          description: Optional photo of the mailing receipt / certified-mail label, captured at confirm-mailing time.
+        mailingConfirmedByUserId:
+          type: string
+          nullable: true
+          description: Clerk user id of the server who confirmed the mailing was actually completed.
+        postingLocationDescription:
+          type: string
+          nullable: true
+          description: Free-text description of where documents were posted (posting outcome).
+        postingHasCourtOrder:
+          type: boolean
+          nullable: true
+          description: Whether a court order authorizing posting service was on file (NRCP 4(g)). Required true on the request when posting; surfaced for audit on read.
+        publicationOrderRef:
+          type: string
+          nullable: true
+          description: Reference to the court order authorizing service by publication (NRS 14.040).
+        publicationNewspaper:
+          type: string
+          nullable: true
+          description: Newspaper of general circulation in which the summons was published.
+        publicationCounty:
+          type: string
+          nullable: true
+          description: County in which the newspaper is published / circulated.
+        publicationFirstDate:
+          type: string
+          format: date-time
+          nullable: true
+          description: Date of the first publication.
+        publicationLastDate:
+          type: string
+          format: date-time
+          nullable: true
+          description: Date of the final publication (typically 4 weeks after first).
+        publicationHasCourtOrder:
+          type: boolean
+          nullable: true
+          description: Server confirms a court order authorizing publication (NRS 14.040) is on file.
+        nonEstSummary:
+          type: string
+          nullable: true
+          description: Diligent-search summary returned when subject cannot be located after multiple attempts.
+        unableReason:
+          type: string
+          enum: [no_answer, refused, wrong_address, gated, other]
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - jobId
+        - serverId
+        - outcome
+        - attemptedAt
+        - gpsLat
+        - gpsLng
+        - createdAt
+
+    LogAttemptBody:
+      type: object
+      description: |
+        When `outcome` is `substitute`, the substitute trio
+        (`substituteRecipientName`, `substituteOver18`, `substituteVerifiedResidence`)
+        is required. State-specific rules layer on top: CA + NY require
+        `acknowledgeMailFollowup=true`; FL requires `substituteIsCoResident=true`
+        and accepts `substituteRecipientAge >= 15` in lieu of 18+.
+        When `outcome` is `unable`, `unableReason` is required.
+        Nevada-specific outcomes `mail` and `posting` complete service
+        without an in-person delivery and require, respectively, a
+        `mailingDate`+`mailingAddress` or a `postingLocationDescription`
+        (plus `postingHasCourtOrder=true` confirming a court order
+        authorizing posting is on file). `publication` (NRS 14.040)
+        requires `publicationOrderRef`, `publicationNewspaper`,
+        `publicationFirstDate`, `publicationLastDate`, and
+        `publicationHasCourtOrder=true`. `non_est` (return of non-est
+        / diligent search) requires `nonEstSummary`.
+      properties:
+        outcome:
+          type: string
+          enum: [personal, substitute, mail, posting, publication, non_est, unable]
+        attemptedAt:
+          type: string
+          format: date-time
+          description: |
+            Actual moment of service (or attempt). Defaults to the
+            request-receipt time when omitted, but the stepped Mark-Served
+            flow always sends an explicit value so the affidavit reflects
+            the real service time, not the confirmation time.
+        gpsLat:
+          type: number
+        gpsLng:
+          type: number
+        gpsProvider:
+          type: string
+          description: Provenance of the GPS fix ("gps", "gps_assisted", "network"). Heuristic-derived from coords.accuracy.
+        identityMethod:
+          type: string
+          enum: [verbal, photo_match, known, other]
+          description: How the server confirmed the recipient's identity at the door.
+        identityOtherText:
+          type: string
+          description: Free-text explanation when identityMethod = "other".
+        notes:
+          type: string
+        photoUrl:
+          type: string
+        substituteRecipientName:
+          type: string
+        substituteOver18:
+          type: boolean
+        substituteVerifiedResidence:
+          type: boolean
+        substituteRecipientAge:
+          type: integer
+          minimum: 0
+          description: Explicit age. Used by FL where 15+ qualifies; supplied in addition to or instead of `substituteOver18`.
+        substituteIsCoResident:
+          type: boolean
+          description: Whether the substitute resides at the address. Required for Florida substitute service.
+        acknowledgeMailFollowup:
+          type: boolean
+          description: Server commits to mailing a copy. Required for California (CCP §415.20) and New York (CPLR §308) substitute service.
+        serviceAddress:
+          type: string
+          description: Street address where service occurred (defaults to the job's recipient address if omitted).
+        serviceCity:
+          type: string
+        serviceState:
+          type: string
+        serviceZip:
+          type: string
+        methodNarrative:
+          type: string
+          description: Free-text description of how service was effected. Rendered into the affidavit's "manner of service" block.
+        recipientRelationship:
+          type: string
+          description: Relationship of the person served to the named party (substitute outcome).
+        recipientDescription:
+          type: string
+          description: |
+            Free-text physical description of the person served (substitute
+            outcome). Kept for backwards compatibility — new clients should
+            populate the structured fields below (age estimate / gender /
+            height / weight / identifying features) so the affidavit
+            renders the same data the courts look for on a Nevada PoS.
+        recipientAgeEstimate:
+          type: string
+          description: |
+            Estimated age (or age range, e.g. "30-35") of the substitute
+            recipient. Free-text so servers can write "mid 40s" when an
+            exact number isn't observable.
+        recipientGender:
+          type: string
+          description: Reported gender of the substitute recipient (e.g. "F", "M", "Non-binary").
+        recipientHeight:
+          type: string
+          description: Approximate height of the substitute recipient (e.g. "5'8\"").
+        recipientWeight:
+          type: string
+          description: Approximate weight of the substitute recipient (e.g. "165 lb").
+        recipientIdentifyingFeatures:
+          type: string
+          description: |
+            Identifying features (hair colour, ethnicity, glasses, build,
+            tattoos, etc.) of the substitute recipient. Optional but
+            strongly recommended for substitute outcomes so the served
+            person can be re-identified later.
+        mailingDate:
+          type: string
+          format: date-time
+          description: When the follow-up / certified mailing was deposited. Required for `mail` outcome.
+        mailingAddress:
+          type: string
+          description: Address to which the mailed copy was sent. Required for `mail` outcome.
+        postingLocationDescription:
+          type: string
+          description: Where on the property the documents were posted. Required for `posting` outcome.
+        postingHasCourtOrder:
+          type: boolean
+          description: |
+            Server confirms a court order authorizing service by posting
+            is on file. Required true for `posting` outcome — Nevada
+            posting service is only valid pursuant to NRCP 4(g) where the
+            court has expressly authorized this method.
+        publicationOrderRef:
+          type: string
+          description: Reference to the court order authorizing service by publication (NRS 14.040). Required for `publication`.
+        publicationNewspaper:
+          type: string
+          description: Newspaper of general circulation in which the summons was published. Required for `publication`.
+        publicationCounty:
+          type: string
+          description: County in which the newspaper is published.
+        publicationFirstDate:
+          type: string
+          format: date-time
+          description: Date of first publication. Required for `publication`.
+        publicationLastDate:
+          type: string
+          format: date-time
+          description: Date of final publication. Required for `publication`.
+        publicationHasCourtOrder:
+          type: boolean
+          description: Server confirms the court order authorizing publication (NRS 14.040) is on file. Required true for `publication`.
+        nonEstSummary:
+          type: string
+          description: Diligent-search summary describing why the subject could not be located. Required for `non_est`.
+        unableReason:
+          type: string
+          enum: [no_answer, refused, wrong_address, gated, other]
+        signatureTypedName:
+          type: string
+          minLength: 2
+          description: |
+            Server's typed printed name. Required for every completing
+            outcome (`personal`, `substitute`, `mail`, `posting`) so an
+            affidavit of service can be generated. Not required for the
+            non-completing `unable` outcome.
+        signatureImageUrl:
+          type: string
+          description: |
+            Object-storage path of the canvas-drawn signature PNG (from
+            /storage/server-photo/request-url, contentType=image/png).
+            Required for every completing outcome (`personal`,
+            `substitute`, `mail`, `posting`). Not required for the
+            non-completing `unable` outcome.
+      required:
+        - outcome
+        - gpsLat
+        - gpsLng
+
+    ConfirmMailingBody:
+      type: object
+      description: |
+        Records actual completion of the substitute follow-up mailing.
+        Both fields are optional: `completedAt` defaults to the
+        request-receipt time when omitted, and the proof photo is
+        encouraged but not legally required.
+      properties:
+        completedAt:
+          type: string
+          format: date-time
+          description: Moment the mailing was actually deposited. Defaults to now if omitted.
+        proofPhotoUrl:
+          type: string
+          description: Object-storage path of an optional photo of the mailing receipt or certified-mail label (from /storage/server-photo/request-url).
+
+    ServerPhotoUploadRequest:
+      type: object
+      properties:
+        jobId:
+          type: integer
+        contentType:
+          type: string
+        size:
+          type: integer
+      required:
+        - jobId
+        - contentType
+        - size
+
+    ServerPhotoUploadResponse:
+      type: object
+      properties:
+        uploadURL:
+          type: string
+        objectPath:
+          type: string
+      required:
+        - uploadURL
+        - objectPath
+
+    Server:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+        serverTier:
+          type: string
+          enum: [basic, pro, licensed]
+        licenseNumber:
+          type: string
+        serviceArea:
+          type: string
+        businessAddress:
+          type: string
+          nullable: true
+          description: Server's business / mailing address. Rendered into the affidavit attestation block.
+        isLicensedNvServer:
+          type: boolean
+          description: Server attests they hold a Nevada PILB Process Server work card.
+        licenseCounty:
+          type: string
+          nullable: true
+          description: Nevada county of license registration (when isLicensedNvServer = true).
+        serverType:
+          type: string
+          nullable: true
+          enum: [licensed_nv, registered, private, sheriff]
+          description: Self-declared server classification rendered on the affidavit attestation block.
+        photoUrl:
+          type: string
+          nullable: true
+          description: Object-storage path of the server's profile headshot (from /storage/profile-photo/request-url). Null until uploaded.
+        active:
+          type: boolean
+        jobsCompleted:
+          type: integer
+        stripeAccountId:
+          type: string
+          nullable: true
+          description: Stripe Connect Express account id (null until onboarding starts).
+        payoutsEnabled:
+          type: boolean
+          description: True iff Stripe reports both charges_enabled && payouts_enabled.
+        verifiedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Mirrored from server_credentials.verified_at; populated after the background check passes.
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - email
+        - serverTier
+        - active
+        - jobsCompleted
+        - payoutsEnabled
+        - createdAt
+
+    CreateServerBody:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+        serverTier:
+          type: string
+          enum: [basic, pro, licensed]
+        licenseNumber:
+          type: string
+        serviceArea:
+          type: string
+        businessAddress:
+          type: string
+        isLicensedNvServer:
+          type: boolean
+        licenseCounty:
+          type: string
+      required:
+        - name
+        - email
+        - serverTier
+
+    UpdateServerBody:
+      type: object
+      properties:
+        name:
+          type: string
+        phone:
+          type: string
+        serverTier:
+          type: string
+          enum: [basic, pro, licensed]
+        licenseNumber:
+          type: string
+        serviceArea:
+          type: string
+        active:
+          type: boolean
+        businessAddress:
+          type: string
+        isLicensedNvServer:
+          type: boolean
+        licenseCounty:
+          type: string
+
+    UpdateMyServerProfileBody:
+      type: object
+      description: |
+        Self-edit profile fields available to a server on the
+        credentialing page. Mutates only Nevada-affidavit-relevant fields;
+        Stripe state, server tier, and active flag are not editable here.
+      properties:
+        businessAddress:
+          type: string
+          description: Business address printed on Nevada affidavits.
+        isLicensedNvServer:
+          type: boolean
+          description: |
+            True if this server holds a Nevada PILB process-server work
+            card. Drives the credentialing line that appears in the
+            affidavit body.
+        licenseNumber:
+          type: string
+        licenseCounty:
+          type: string
+          description: County of license — also used as the affidavit venue.
+        serverType:
+          type: string
+          enum: [licensed_nv, registered, private, sheriff]
+          description: Self-declared server classification (licensed_nv | registered | private | sheriff).
+        photoUrl:
+          type: string
+          nullable: true
+          description: Object-storage path of the server's profile headshot (from /storage/profile-photo/request-url). Send null to clear.
+
+    ProfilePhotoUploadRequest:
+      type: object
+      description: Optional metadata for a server profile-photo upload. No job binding.
+      properties:
+        contentType:
+          type: string
+        size:
+          type: integer
+
+    JobServedDocument:
+      type: object
+      description: A single legal document associated with a job (for the affidavit).
+      properties:
+        id:
+          type: integer
+        jobId:
+          type: integer
+        title:
+          type: string
+          description: Free-text title (e.g. "Summons", "Complaint").
+        documentType:
+          type: string
+          description: |
+            Free-text classification (e.g. "Summons", "Complaint",
+            "Subpoena Duces Tecum"). Affidavit lists each document by
+            this label.
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - jobId
+        - title
+        - documentType
+        - createdAt
+
+    JobServedDocumentInput:
+      type: object
+      description: Input shape for documentsServed entries on create/update.
+      properties:
+        title:
+          type: string
+          minLength: 1
+        documentType:
+          type: string
+          minLength: 1
+      required:
+        - title
+        - documentType
+
+    Client:
+      type: object
+      properties:
+        id:
+          type: integer
+        firmName:
+          type: string
+        contactName:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+        address:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - firmName
+        - contactName
+        - email
+        - createdAt
+
+    CreateClientBody:
+      type: object
+      properties:
+        firmName:
+          type: string
+        contactName:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+        address:
+          type: string
+      required:
+        - firmName
+        - contactName
+        - email
+
+    FirmProfile:
+      type: object
+      description: |
+        Attorney firm identity + mailing address + default pickup contact.
+        `attorneyOnboardedAt` is read-only on PATCH (server stamps it the
+        first time required fields are saved) and drives the first-visit
+        onboarding redirect on the attorney dashboard.
+      properties:
+        firmName:
+          type: string
+          nullable: true
+        firmAddress:
+          type: string
+          nullable: true
+        firmAddress2:
+          type: string
+          nullable: true
+        firmCity:
+          type: string
+          nullable: true
+        firmState:
+          type: string
+          nullable: true
+        firmZip:
+          type: string
+          nullable: true
+        firmPhone:
+          type: string
+          nullable: true
+        firmContactName:
+          type: string
+          nullable: true
+        barNumber:
+          type: string
+          nullable: true
+        barState:
+          type: string
+          nullable: true
+        attorneyOnboardedAt:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+
+    AccountPreferences:
+      type: object
+      description: Mutable account preferences shared across portals.
+      properties:
+        phone:
+          type: string
+          nullable: true
+          description: E.164 phone number, e.g. "+14155551234".
+        smsOptOut:
+          type: boolean
+
+    DashboardSummary:
+      type: object
+      properties:
+        totalJobs:
+          type: integer
+        servedCount:
+          type: integer
+          description: All-time count of jobs with status "served" for this user.
+        servedToday:
+          type: integer
+        servedThisMonth:
+          type: integer
+          description: Count of jobs served by the caller (or for the caller, depending on role) in the current calendar month.
+        pendingJobs:
+          type: integer
+        activeServers:
+          type: integer
+        successRate:
+          type: number
+        avgCompletionHours:
+          type: number
+      required:
+        - totalJobs
+        - servedCount
+        - servedToday
+        - servedThisMonth
+        - pendingJobs
+        - activeServers
+        - successRate
+        - avgCompletionHours
+
+    StatusCount:
+      type: object
+      properties:
+        status:
+          type: string
+        count:
+          type: integer
+      required:
+        - status
+        - count
+
+    UploadUrlRequest:
+      type: object
+      required: [name, size, contentType]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Original file name.
+        size:
+          type: integer
+          minimum: 1
+          description: File size in bytes.
+        contentType:
+          type: string
+          minLength: 1
+          description: MIME type of the file (e.g. `application/pdf`).
+        jobId:
+          type: integer
+          description: Optional job to associate the upload with.
+
+    UploadUrlResponse:
+      type: object
+      required: [uploadURL, objectPath]
+      properties:
+        uploadURL:
+          type: string
+          format: uri
+          description: Presigned GCS URL for PUT upload.
+        objectPath:
+          type: string
+          description: Normalized object path (e.g. `/objects/uploads/uuid`). Persist this.
+        metadata:
+          $ref: '#/components/schemas/UploadUrlRequest'
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    Document:
+      type: object
+      required: [id, name, size, contentType, objectPath, createdAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        size:
+          type: integer
+          description: Bytes.
+        contentType:
+          type: string
+        objectPath:
+          type: string
+        jobId:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateDocumentBody:
+      type: object
+      required: [name, size, contentType, objectPath]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        size:
+          type: integer
+          minimum: 1
+        contentType:
+          type: string
+          minLength: 1
+        objectPath:
+          type: string
+          minLength: 1
+        jobId:
+          type: integer
+
+    DocumentUsage:
+      type: object
+      required: [usedBytes, quotaBytes, plan]
+      properties:
+        usedBytes:
+          type: integer
+        quotaBytes:
+          type: integer
+          description: -1 for unlimited (Enterprise).
+        plan:
+          type: string
+          enum: [solo, firm, firm_pro, enterprise]
+
+    PricingSnapshot:
+      type: object
+      required: [servePricesCents, proServeMonthlyCents, vaultPlans, serverCredentialingCents, platformFeeRate]
+      properties:
+        servePricesCents:
+          type: object
+          description: Per-tier per-service-type serve price in cents.
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: integer
+        proServeMonthlyCents:
+          type: object
+          description: Monthly ProServe subscription price in cents per tier.
+          additionalProperties:
+            type: integer
+        vaultPlans:
+          type: object
+          description: Personal Vault plans keyed by tier.
+          additionalProperties:
+            type: object
+            required: [monthlyCents, storageGb, label]
+            properties:
+              monthlyCents:
+                type: integer
+              storageGb:
+                type: integer
+              label:
+                type: string
+        serverCredentialingCents:
+          type: integer
+          description: One-time server background-check fee in cents.
+        platformFeeRate:
+          type: number
+          description: Platform's share of each serve as a fraction (0.20 = 20%).
+
+    Subscription:
+      type: object
+      required: [id, userId, tier, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        userId:
+          type: string
+        tier:
+          type: string
+          enum: [solo, firm, firm_pro]
+        status:
+          type: string
+          enum: [active, past_due, canceled, incomplete]
+        stripeSubscriptionId:
+          type: string
+          nullable: true
+        stripeCustomerId:
+          type: string
+          nullable: true
+        stripePriceId:
+          type: string
+          nullable: true
+        currentPeriodEnd:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    VaultSubscription:
+      type: object
+      required: [id, userId, tier, status, storageGb, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        userId:
+          type: string
+        tier:
+          type: string
+          enum: [basic, legal, pro]
+        status:
+          type: string
+          enum: [active, past_due, canceled, incomplete]
+        storageGb:
+          type: integer
+        stripeSubscriptionId:
+          type: string
+          nullable: true
+        stripeCustomerId:
+          type: string
+          nullable: true
+        stripePriceId:
+          type: string
+          nullable: true
+        currentPeriodEnd:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ServerCredential:
+      type: object
+      required: [id, userId, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        userId:
+          type: string
+        status:
+          type: string
+          enum: [unpaid, pending, verified, failed]
+        stripePaymentIntentId:
+          type: string
+          nullable: true
+        paymentId:
+          type: integer
+          nullable: true
+        backgroundCheckId:
+          type: string
+          nullable: true
+        failureReason:
+          type: string
+          nullable: true
+        verifiedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Payment:
+      type: object
+      required: [id, userId, kind, amountCents, platformFeeCents, serverPayoutCents, currency, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        userId:
+          type: string
+        kind:
+          type: string
+          enum: [marketplace_serve, proserve_subscription, vault_subscription, server_credentialing]
+        amountCents:
+          type: integer
+        platformFeeCents:
+          type: integer
+        serverPayoutCents:
+          type: integer
+        currency:
+          type: string
+        status:
+          type: string
+          enum: [pending, succeeded, failed, refunded]
+        jobId:
+          type: integer
+          nullable: true
+        subscriptionId:
+          type: integer
+          nullable: true
+        vaultSubscriptionId:
+          type: integer
+          nullable: true
+        serverCredentialId:
+          type: integer
+          nullable: true
+        stripePaymentIntentId:
+          type: string
+          nullable: true
+        stripeInvoiceId:
+          type: string
+          nullable: true
+        stripeChargeId:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Payout:
+      type: object
+      required: [id, serverId, userId, jobId, amountCents, currency, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        serverId:
+          type: integer
+        userId:
+          type: string
+        jobId:
+          type: integer
+        amountCents:
+          type: integer
+        currency:
+          type: string
+        status:
+          type: string
+          enum: [pending, in_transit, paid, failed]
+        stripeTransferId:
+          type: string
+          nullable: true
+        stripeAccountId:
+          type: string
+          nullable: true
+        paidAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Wallet:
+      type: object
+      required:
+        - paidCents
+        - pendingCents
+        - failedCents
+        - platformFeeRate
+        - payoutsEnabled
+        - hasStripeAccount
+        - connectAvailableCents
+        - recentPayouts
+      properties:
+        paidCents:
+          type: integer
+          description: Lifetime paid-out cents to this server.
+        pendingCents:
+          type: integer
+          description: Cents queued (pending or in-transit) but not yet paid.
+        failedCents:
+          type: integer
+          description: |
+            Cents that have a failed Stripe transfer attempt and need
+            attention. Surfaced separately from `pendingCents` so the wallet
+            UI can call out money that won't move on its own.
+        platformFeeRate:
+          type: number
+          description: Platform fee fraction (server keeps 1 - platformFeeRate).
+        payoutsEnabled:
+          type: boolean
+          description: True iff the server's Stripe Connect account is fully onboarded.
+        hasStripeAccount:
+          type: boolean
+          description: True if any Stripe Connect account exists, even if not fully onboarded.
+        connectAvailableCents:
+          type: integer
+          description: |
+            Cents currently available in the server's Stripe Connect
+            account that can be paid out *right now* via "Pay Now".
+            Distinct from `pendingCents` (which counts SERVED.-side
+            transfers, including ones still in Stripe's holding period).
+        payoutSchedule:
+          type: object
+          nullable: true
+          required: [interval]
+          description: |
+            Active Stripe payout schedule on the connected account.
+            Defaults to weekly/Friday for new servers. Null if we couldn't
+            fetch it from Stripe.
+          properties:
+            interval:
+              type: string
+              description: One of "manual", "daily", "weekly", "monthly".
+            weeklyAnchor:
+              type: string
+              nullable: true
+              description: Day of week for weekly interval (e.g. "friday").
+            monthlyAnchor:
+              type: integer
+              nullable: true
+              description: Day of month for monthly interval (1-31).
+            delayDays:
+              type: integer
+              nullable: true
+              description: Stripe holding period before funds become available.
+        recentPayouts:
+          type: array
+          description: Most recent 50 payout rows (newest first).
+          items:
+            $ref: '#/components/schemas/PayoutRow'
+        nextPayoutArrivalDate:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Best-effort ETA for when the server's next pending transfer will
+            land in their bank account. Sourced from the connected Stripe
+            account's payout schedule (delay_days). Null when there is no
+            pending balance.
+        lifetimeJobsCompleted:
+          type: integer
+          description: |
+            Total jobs this server has fully completed (status = "served").
+            Powers the Career Pipeline counter on the server wallet.
+        lifetimeEarningsCents:
+          type: integer
+          description: |
+            Total cents this server has earned across every served job
+            (sum of `serverPayoutCents` on completed jobs). Includes
+            paid + pending + in-transit; mirrors the Career Pipeline total.
+
+    PayoutRow:
+      type: object
+      required: [id, jobId, amountCents, status, createdAt]
+      properties:
+        id:
+          type: integer
+        jobId:
+          type: integer
+        amountCents:
+          type: integer
+        status:
+          type: string
+          enum: [pending, in_transit, paid, failed]
+        paidAt:
+          type: string
+          format: date-time
+          nullable: true
+        arrivalDate:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Expected (or actual, post-payout) date the funds will arrive in
+            the server's bank account. Captured from the connected account's
+            payout schedule when the Stripe transfer was created.
+        createdAt:
+          type: string
+          format: date-time
+        stripeTransferId:
+          type: string
+          nullable: true
+        failureReason:
+          type: string
+          nullable: true
+          description: |
+            Short, human-readable reason populated when this row's Stripe
+            transfer failed. Typically a Stripe error code plus truncated
+            message. Only set when `status === "failed"`.
+
+    ServerStatus:
+      type: object
+      required: [credentialing, payouts, serverStatus, canAcceptJobs, trainingCompletedAt]
+      properties:
+        credentialing:
+          type: object
+          required: [status, hasRow]
+          properties:
+            status:
+              type: string
+              nullable: true
+              enum: [unpaid, pending, verified, failed]
+            verifiedAt:
+              type: string
+              format: date-time
+              nullable: true
+            failureReason:
+              type: string
+              nullable: true
+            hasRow:
+              type: boolean
+        trainingCompletedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Timestamp the server finished the in-portal onboarding training
+            video. Null until they hit "Mark training complete" on the
+            Training tab. Job-claim endpoint rejects with `training_required`
+            while this is null.
+        payouts:
+          type: object
+          required: [hasStripeAccount, payoutsEnabled]
+          properties:
+            hasStripeAccount:
+              type: boolean
+            payoutsEnabled:
+              type: boolean
+        serverStatus:
+          type: string
+          enum: [pending, active, suspended, inactive]
+          description: |
+            Account lifecycle. Only `active` servers can accept jobs;
+            `suspended` and `inactive` show a tailored blocked banner.
+        licenseExpiry:
+          type: string
+          format: date
+          nullable: true
+          description: |
+            Driver's license expiration date (admin-captured). Used by the
+            UI to nudge servers when expiry is within 30 days.
+        canAcceptJobs:
+          type: boolean
+          description: Convenience flag — true iff serverStatus === active AND verified AND payoutsEnabled.
+
+    CredentialingCheckoutResponse:
+      type: object
+      required: [url, sessionId]
+      properties:
+        url:
+          type: string
+          nullable: true
+        sessionId:
+          type: string
+
+    InstantPayoutResponse:
+      type: object
+      required: [payoutId, amountCents, status]
+      properties:
+        payoutId:
+          type: string
+          description: Stripe payout id (po_…) on the connected account.
+        amountCents:
+          type: integer
+          description: Amount paid out in cents.
+        arrivalDate:
+          type: string
+          format: date-time
+          nullable: true
+          description: Stripe's estimated bank arrival timestamp.
+        status:
+          type: string
+          description: Stripe payout status (pending/in_transit/paid/failed/canceled).
+
+    ConnectOnboardResponse:
+      type: object
+      required: [url, accountId]
+      properties:
+        url:
+          type: string
+        accountId:
+          type: string
+
+    ConnectRefreshResponse:
+      type: object
+      required: [payoutsEnabled, stripeAccountId, detailsSubmitted, requirementsCount]
+      properties:
+        payoutsEnabled:
+          type: boolean
+        stripeAccountId:
+          type: string
+        detailsSubmitted:
+          type: boolean
+        requirementsCount:
+          type: integer
+
+    ConnectDashboardLoginResponse:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+
+    AdminFailServerBody:
+      type: object
+      properties:
+        reason:
+          type: string
+
+    AdminVerifyServerResponse:
+      type: object
+      required: [credential, serverId]
+      properties:
+        credential:
+          $ref: '#/components/schemas/ServerCredential'
+        serverId:
+          type: integer
+
+    ProServeCheckoutBody:
+      type: object
+      required: [tier]
+      properties:
+        tier:
+          type: string
+          enum: [solo, firm, firm_pro]
+
+    VaultCheckoutBody:
+      type: object
+      required: [tier]
+      properties:
+        tier:
+          type: string
+          enum: [basic, legal, pro]
+
+    CheckoutOrSwitchResponse:
+      type: object
+      required: [mode]
+      description: |
+        `mode: "checkout"` means the caller has no active sub of this kind — `url`
+        is a Stripe-hosted Checkout Session to redirect to. `mode: "switched"`
+        means an active sub already existed and the plan was updated in place
+        (no redirect needed); the new tier is reflected via the existing
+        `/me/subscription` or `/me/vault-subscription` endpoint.
+      properties:
+        mode:
+          type: string
+          enum: [checkout, switched]
+        url:
+          type: string
+          nullable: true
+          description: Present when `mode === "checkout"`.
+        tier:
+          type: string
+          description: Tier the caller now holds (present when `mode === "switched"`).
+
+    PortalSessionResponse:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+
+    DraftJobsCheckoutBody:
+      type: object
+      required: [jobIds]
+      properties:
+        jobIds:
+          type: array
+          items:
+            type: integer
+          minItems: 1
+          maxItems: 50
+          description: |
+            Ids of draft jobs to pay for in a single Checkout session. All
+            ids must belong to the calling attorney and currently be in
+            `draft` status.
+        queueId:
+          type: integer
+          nullable: true
+          description: |
+            Optional id of a `DraftCheckoutQueue` row this batch belongs
+            to. When supplied, the webhook will atomically increment the
+            queue's `paidCount` once Stripe confirms the session, so the
+            resume banner advances on its own and the next batch is ready
+            without any client-side bookkeeping.
+
+    DraftJobsCheckoutResponse:
+      type: object
+      required: [url, sessionId, totalCents]
+      properties:
+        url:
+          type: string
+          description: Hosted Stripe Checkout URL to redirect the attorney to.
+        sessionId:
+          type: string
+        totalCents:
+          type: integer
+          description: Sum of `grossCents` across all included jobs (display only).
+
+    DraftCheckoutQueue:
+      type: object
+      required:
+        - id
+        - chunks
+        - paidCount
+        - totalCents
+        - expiresAt
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: integer
+        chunks:
+          type: array
+          description: |
+            Ordered batches of draft job ids. The next batch to pay is
+            `chunks[paidCount]`. Chunks already fully paid have been
+            pruned by the server before this response is returned.
+          items:
+            type: array
+            items:
+              type: integer
+        paidCount:
+          type: integer
+          description: |
+            Number of leading chunks that have already been paid for.
+            Always `< chunks.length` for an active queue.
+        totalCents:
+          type: integer
+          description: Sum of `grossCents` across all chunks at queue creation time.
+        expiresAt:
+          type: string
+          format: date-time
+          description: Hard TTL — the queue stops being shown after this time.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    UpsertDraftCheckoutQueueBody:
+      type: object
+      required: [chunks, totalCents]
+      properties:
+        chunks:
+          type: array
+          minItems: 2
+          description: |
+            Ordered batches of draft job ids. Must contain at least two
+            chunks — a single-chunk selection doesn't need a queue
+            because there is nothing to resume after the one Checkout
+            session completes.
+          items:
+            type: array
+            items:
+              type: integer
+            minItems: 1
+            maxItems: 50
+        totalCents:
+          type: integer
+          description: Display-only total in cents across all chunks.
+
+    DismissedResponse:
+      type: object
+      required: [dismissed]
+      properties:
+        dismissed:
+          type: boolean
+
+    ServePricePreview:
+      type: object
+      required:
+        - serviceType
+        - pricingTier
+        - tierLabel
+        - grossCents
+        - formattedAmount
+        - isSubscriber
+        - publicGrossCents
+      properties:
+        serviceType:
+          type: string
+          enum: [standard, rush, licensed]
+        pricingTier:
+          type: string
+          enum: [public, solo, firm, firm_pro]
+        tierLabel:
+          type: string
+          description: Human-readable label, e.g. "Public" or "ProServe Solo".
+        grossCents:
+          type: integer
+          description: Live per-serve price in cents for the caller.
+        formattedAmount:
+          type: string
+          description: Display-formatted USD string, e.g. "$75".
+        isSubscriber:
+          type: boolean
+          description: True when the caller has an active ProServe subscription.
+        publicGrossCents:
+          type: integer
+          description: |
+            Public (non-subscriber) per-serve price in cents for the same
+            service type. Used by the UI to render an upsell delta.
+
+    PublishLocationBody:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+        lng:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+        accuracyM:
+          type: number
+          format: double
+          description: Reported GPS accuracy in meters.
+        headingDeg:
+          type: number
+          format: double
+          description: Compass heading in degrees clockwise from north.
+        speedMps:
+          type: number
+          format: double
+          description: Reported speed in meters per second.
+
+    JobLocationPing:
+      type: object
+      required: [lat, lng, recordedAt, ageSeconds]
+      properties:
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        accuracyM:
+          type: number
+          format: double
+          nullable: true
+        headingDeg:
+          type: number
+          format: double
+          nullable: true
+        speedMps:
+          type: number
+          format: double
+          nullable: true
+        recordedAt:
+          type: string
+          format: date-time
+        ageSeconds:
+          type: integer
+          description: Seconds elapsed between recordedAt and the response.
+
+    JobLatestLocation:
+      type: object
+      required: [jobId, status]
+      properties:
+        jobId:
+          type: integer
+        status:
+          type: string
+          enum: [in_progress, en_route]
+        location:
+          oneOf:
+            - $ref: "#/components/schemas/JobLocationPing"
+            - type: "null"
+        destination:
+          type: object
+          nullable: true
+          description: Recipient address for map rendering, when geocoded.
+          properties:
+            address:
+              type: string
+            lat:
+              type: number
+              format: double
+              nullable: true
+            lng:
+              type: number
+              format: double
+              nullable: true
+
+
+    JobDocument:
+      type: object
+      required: [id, name, size, contentType, downloadUrl]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        size:
+          type: integer
+          format: int64
+        contentType:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        downloadUrl:
+          type: string
+          description: Relative URL the browser can fetch (cookie session auth).

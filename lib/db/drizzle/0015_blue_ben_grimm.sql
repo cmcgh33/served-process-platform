@@ -1,0 +1,1 @@
+ALTER TABLE "service_attempts" ADD COLUMN "posting_has_court_order" boolean;

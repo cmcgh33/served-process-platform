@@ -1,0 +1,1 @@
+ALTER TABLE "jobs" ADD COLUMN "notice_of_mail_pdf_url" text;

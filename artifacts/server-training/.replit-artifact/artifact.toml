@@ -1,0 +1,31 @@
+kind = "video"
+previewPath = "/server-training/"
+title = "SERVED. Server Training Video"
+version = "1.0.0"
+id = "artifacts/server-training"
+router = "path"
+
+[[integratedSkills]]
+name = "video-js"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/server-training/" ]
+localPort = 18706
+
+[services.development]
+run = "pnpm --filter @workspace/server-training run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/server-training", "run", "build" ]
+publicDir = "artifacts/server-training/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18706"
+BASE_PATH = "/server-training/"

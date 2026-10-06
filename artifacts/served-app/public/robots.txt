@@ -1,0 +1,17 @@
+User-agent: *
+Allow: /
+Allow: /demo
+Allow: /demo/individual
+Allow: /demo/attorney
+Allow: /demo/server
+Allow: /sign-up
+
+# Auth-gated portals — do not index dashboards, job feeds, or admin tools.
+Disallow: /app/
+Disallow: /sign-in
+Disallow: /api/
+
+# Private invite links — personalized per-recipient URLs, not for search.
+Disallow: /demo/watch/
+
+Sitemap: https://servedapp.co/sitemap.xml
