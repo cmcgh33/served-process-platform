@@ -32,6 +32,10 @@ Requesters need visibility into a service request, law firms need structured cas
 
 The marketing site makes operational claims. This repository documents software implementation and review evidence; it does not independently establish licensing coverage, legal sufficiency, service availability, or payment settlement times.
 
+## Product and program delivery evidence
+
+[Priorities, milestones, dependencies, RAID, release gates and measurement plan](docs/delivery-plan.md) connect the existing app to a proposed integration release. Planning targets are explicitly separate from executed checks and production outcomes. This documentation update does not change the deployed Replit app.
+
 ## Technology
 
 React 19, TypeScript, Vite, Tailwind CSS, Express 5, PostgreSQL, Drizzle ORM, Clerk, Stripe, and an OpenAPI contract with generated clients. The exported workspace also includes an attorney demo, server training artifact, and mockup sandbox.
